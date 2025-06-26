@@ -231,11 +231,13 @@ install_binary() {
   cd "$HOME/mayanode"
   TAG=mainnet NET=mainnet make install
 
-  # ensure 'mayanode' resolves in *every* shell without re-login
-  if ! command -v mayanode >/dev/null 2>&1; then
-    sudo ln -sf "$HOME/go/bin/mayanode" /usr/local/bin/mayanode
-    echo "[i] Symlinked mayanode → /usr/local/bin/mayanode"
-  fi
+  # Always expose the CLI system-wide
+  sudo install -m 0755 "$HOME/go/bin/mayanode" /usr/local/bin/mayanode
+
+  # Forget any old PATH look-ups so the new binary is found immediately
+  hash -r            # <-- added
+
+  echo "[i] Installed mayanode → /usr/local/bin/mayanode"
 }
 
 
