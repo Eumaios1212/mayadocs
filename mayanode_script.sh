@@ -52,13 +52,37 @@ install_packages() {
 }
 
 install_go() {
-  local go_ver="1.22.2"  # Version that's been regression-tested
-  cd "$HOME"
-  sudo rm -rf /usr/local/go/
-  wget -q "https://golang.org/dl/go${go_ver}.linux-amd64.tar.gz"
-  sudo tar -C /usr/local -xzf "go${go_ver}.linux-amd64.tar.gz"
-  rm "go${go_ver}.linux-amd64.tar.gz"
+  local go_ver="1.22.2"                               # update when Maya supports a newer Go
+  local tar="go${go_ver}.linux-amd64.tar.gz"
+  local base="https://go.dev/dl"
+
+  # Skip when this exact version is already present
+  if command -v go >/dev/null 2>&1 && go version | grep -q "go${go_ver}"; then
+    echo "[i] Go ${go_ver} already installed – skipping."
+    return 0
+  fi
+
+  cd "$HOME" || return 1
+
+  echo "[→] Downloading Go ${go_ver} …"
+  curl -fsSLO "${base}/${tar}" \
+    || { failure "Download failed"; return 1; }
+  curl -fsSLO "${base}/${tar}.sha256" \
+    || { failure "Checksum file download failed"; rm -f "$tar"; return 1; }
+
+  echo "[→] Verifying checksum …"
+  sha256sum -c "${tar}.sha256" \
+    || { failure "Checksum mismatch"; rm -f "$tar" "${tar}.sha256"; return 1; }
+
+  echo "[→] Installing …"
+  sudo rm -rf /usr/local/go
+  sudo tar -C /usr/local -xzf "$tar" \
+    || { failure "Extraction failed"; return 1; }
+
+  rm -f "$tar" "${tar}.sha256"
+  success "Go ${go_ver} installed successfully"
 }
+
 
 add_go_env() {
   local profile="$HOME/.bash_profile"
