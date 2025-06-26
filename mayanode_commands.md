@@ -1,13 +1,25 @@
 # Important Commands for Mayanode
-## Node status:  
+
+## Top-level JSON object and all its nested fields
+
+```bash
+mayanode status --node tcp://localhost:27147 | jq .
+```
+### Current network
 ```bash
 mayanode status --node tcp://localhost:27147 | jq '.NodeInfo.network'
 ```
 
-## Height and sync status:
+### Height and sync status:
 ```bash
 mayanode status --node tcp://localhost:27147 \
      | jq '.SyncInfo | {height: .latest_block_height, catching_up}'
+```
+
+### Node address & voting power (0 → not a validator)
+```bash
+mayanode status --node tcp://localhost:27147 \
+  | jq '.ValidatorInfo | {address: .Address, voting_power: .VotingPower|tonumber}'
 ```
 
 ## Connected seed nodes by Tendermint peer ID @ IP address:
@@ -23,12 +35,6 @@ curl -s http://localhost:27147/net_info \
 | jq -r '.result.peers[]
         | .application_version.version // empty' \
 | sort -u
-```
-
-## Your validator’s address & voting power (0 → not a validator)
-```bash
-mayanode status --node tcp://localhost:27147 \
-  | jq '.ValidatorInfo | {address: .Address, voting_power: .VotingPower|tonumber}'
 ```
 
 ## Current proposer & round step
