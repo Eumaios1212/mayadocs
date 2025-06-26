@@ -44,6 +44,13 @@ run_step() {
 ###############################################################################
 # Step functions
 ###############################################################################
+install_packages() {
+  sudo apt-get update -y
+  sudo apt-get install -y \
+       git make protobuf-compiler curl wget jq build-essential musl-tools \
+       pv gawk linux-headers-generic ca-certificates gnupg lsb-release lz4 unzip
+}
+
 install_go() {
   local go_ver="1.22.2"  # Version that's been regression-tested
   cd "$HOME"
@@ -87,13 +94,6 @@ EOF
   : "${LD_LIBRARY_PATH:=}"   # protect strict-mode shells that might source later
 }
 
-install_packages() {
-  sudo apt-get update -y
-  sudo apt-get install -y \
-       git make protobuf-compiler curl wget jq build-essential musl-tools \
-       pv gawk linux-headers-generic ca-certificates gnupg lsb-release lz4 unzip
-}
-
 install_docker() {
   sudo mkdir -p /etc/apt/keyrings
   curl -fsSL https://download.docker.com/linux/ubuntu/gpg |
@@ -107,59 +107,13 @@ install_docker() {
        docker-buildx-plugin docker-compose-plugin
 }
 
-setup_ufw() {
-  if ! dpkg -s ufw >/dev/null 2>&1; then
-    sudo apt-get update -y && sudo apt-get install -y ufw
+install_aws_cli() {
+  if ! command -v aws >/dev/null; then
+    curl -s "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
+    unzip -q awscliv2.zip
+    sudo ./aws/install
+    rm -rf aws awscliv2.zip
   fi
-
-  echo "This step will:"
-  echo " • Set default: deny incoming / allow outgoing"
-  echo " • Allow SSH (22/tcp)"
-  echo " • Allow MAYAChain P2P (27146/tcp)"
-  echo " • Allow Tendermint RPC (27147/tcp) from a host *you* choose"
-  echo " • Optionally allow REST (1317/tcp)"
-  echo " • Enable UFW"
-
-  # Extra prompt so users don’t lock themselves out
-  if ! prompt "Continue configuring UFW?"; then
-    echo "UFW setup skipped"
-    return 0
-  fi
-  # safe reset
-  if ! sudo ufw status | grep -q "Status: active"; then
-    sudo ufw --force reset
-  fi
-  sudo ufw --force reset
-  sudo ufw default deny incoming
-  sudo ufw default allow outgoing
-  sudo ufw allow 22/tcp   comment 'SSH'
-
-  sudo ufw allow 27146/tcp comment 'MAYAChain P2P'
-
-  # Ask which IP should reach Tendermint RPC
-  read -rp "Enter host/CIDR for RPC 27147 (blank = skip): " rpc_ip
-  if [[ -z "$rpc_ip" ]]; then
-    echo "[i] RPC remains closed."
-  elif [[ "$rpc_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$ ]]; then
-    sudo ufw allow from "$rpc_ip" to any port 27147 proto tcp comment 'Tendermint RPC'
-    echo "[✓] UFW rule added for $rpc_ip → 27147"
-  else
-    echo "[i] Invalid address – RPC remains closed."
-  fi
-  # Optional REST API – ask which host (if any) may reach it
-  if prompt "Add REST API rule (1317/tcp)?"; then
-    read -rp "  Enter host/CIDR allowed for 1317 (blank = skip): " rest_ip
-    if [[ "$rest_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$ ]]; then
-      sudo ufw allow from "$rest_ip" to any port 1317 proto tcp comment 'Cosmos REST'
-      echo "[✓] UFW rule added for $rest_ip → 1317"
-    else
-      echo "[i] No valid address entered – REST API remains closed."
-    fi
-  fi
-
-
-  sudo ufw --force enable
-  sudo ufw status verbose
 }
 
 install_mayanode() {
@@ -235,15 +189,6 @@ install_binary() {
   if ! command -v mayanode >/dev/null 2>&1; then
     sudo ln -sf "$HOME/go/bin/mayanode" /usr/local/bin/mayanode
     echo "[i] Symlinked mayanode → /usr/local/bin/mayanode"
-  fi
-}
-
-install_aws_cli() {
-  if ! command -v aws >/dev/null; then
-    curl -s "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
-    unzip -q awscliv2.zip
-    sudo ./aws/install
-    rm -rf aws awscliv2.zip
   fi
 }
 
@@ -327,6 +272,59 @@ fetch_snapshot () {
   fi
 }
 
+setup_ufw() {
+  if ! dpkg -s ufw >/dev/null 2>&1; then
+    sudo apt-get update -y && sudo apt-get install -y ufw
+  fi
+
+  echo "This step will:"
+  echo " • Set default: deny incoming / allow outgoing"
+  echo " • Allow SSH (22/tcp)"
+  echo " • Allow MAYAChain P2P (27146/tcp)"
+  echo " • Allow Tendermint RPC (27147/tcp) from a host *you* choose"
+  echo " • Optionally allow REST (1317/tcp)"
+  echo " • Enable UFW"
+
+  # Extra prompt so users don’t lock themselves out
+  if ! prompt "Continue configuring UFW?"; then
+    echo "UFW setup skipped"
+    return 0
+  fi
+  # safe reset
+  if ! sudo ufw status | grep -q "Status: active"; then
+    sudo ufw --force reset
+  fi
+  sudo ufw default deny incoming
+  sudo ufw default allow outgoing
+  sudo ufw allow 22/tcp   comment 'SSH'
+
+  sudo ufw allow 27146/tcp comment 'MAYAChain P2P'
+
+  # Ask which IP should reach Tendermint RPC
+  read -rp "Enter host/CIDR for RPC 27147 (blank = skip): " rpc_ip
+  if [[ -z "$rpc_ip" ]]; then
+    echo "[i] RPC remains closed."
+  elif [[ "$rpc_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$ ]]; then
+    sudo ufw allow from "$rpc_ip" to any port 27147 proto tcp comment 'Tendermint RPC'
+    echo "[✓] UFW rule added for $rpc_ip → 27147"
+  else
+    echo "[i] Invalid address – RPC remains closed."
+  fi
+  # Optional REST API – ask which host (if any) may reach it
+  if prompt "Add REST API rule (1317/tcp)?"; then
+    read -rp "  Enter host/CIDR allowed for 1317 (blank = skip): " rest_ip
+    if [[ "$rest_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$ ]]; then
+      sudo ufw allow from "$rest_ip" to any port 1317 proto tcp comment 'Cosmos REST'
+      echo "[✓] UFW rule added for $rest_ip → 1317"
+    else
+      echo "[i] No valid address entered – REST API remains closed."
+    fi
+  fi
+
+
+  sudo ufw --force enable
+  sudo ufw status verbose
+}
 
 enable_service() {
   sudo systemctl daemon-reload
@@ -339,9 +337,9 @@ enable_service() {
 ###############################################################################
 main() {
   banner "Interactive Mayanode setup script"
+  run_step "Install required apt packages"      install_packages
   run_step "Install Go"                         install_go
   run_step "Add Go env vars"                    add_go_env
-  run_step "Install required apt packages"      install_packages
   run_step "Install Docker & Compose"           install_docker
   run_step "Install AWS CLI"                    install_aws_cli
   run_step "Clone / build Mayanode"             install_mayanode
@@ -353,7 +351,7 @@ main() {
 
   banner "All done!"
   echo "Please reboot"
-  echo "Use   sudo journalctl -feu mayanode   to follow logs."
+  echo "Use sudo journalctl -feu mayanode to follow logs."
 }
 
 main "$@"
