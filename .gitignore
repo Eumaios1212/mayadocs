@@ -1,0 +1,11 @@
+# IntelliJ IDEA project files
+.idea/
+*.iml
+
+# Temporary files
+*.bak
+*.tmp
+
+# Build artifacts or logs (if applicable)
+*.log
+build/
