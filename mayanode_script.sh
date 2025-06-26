@@ -11,7 +11,7 @@ IFS=$'\n\t'
 ###############################################################################
 # Pretty‑printing helpers
 ###############################################################################
-GREEN=$(tput setaf 2)  RED=$(tput setaf 1)  YELLOW=$(tput setaf 3)  RESET=$(tput sgr0)
+GREEN=$(tput setaf 2)  RED=$(tput setaf 9)  YELLOW=$(tput setaf 11)  RESET=$(tput sgr0)
 
 banner()        { printf "\n${YELLOW}==> %s${RESET}\n" "$*"; }
 success()       { printf "${GREEN}✓ %s${RESET}\n" "$*"; }
@@ -141,9 +141,7 @@ install_aws_cli() {
 }
 
 install_mayanode() {
-  # -----------------------------------------------------------------------
   # Skip clone & checkout when the repository already exists
-  # -----------------------------------------------------------------------
   if [ -d "$HOME/mayanode/.git" ]; then
     echo "[i] $HOME/mayanode already exists – skipping clone/build."
     return 0            # success → the wrapper moves on to the next step
@@ -197,8 +195,8 @@ Environment="LD_LIBRARY_PATH=/home/${user}/mayanode/lib"
 Environment="MAYA_COSMOS_TELEMETRY_ENABLED=true"
 Environment="CHAIN_ID=mayachain-mainnet-v1"
 Environment="NET=mainnet"
-Environment="SIGNER_NAME=mayachain"
-Environment="SIGNER_PASSWD=password"
+#Environment="SIGNER_NAME=mayachain"    # Only needed for validator nodes
+#Environment="SIGNER_PASSWD=password"   # Only needed for validator nodes
 
 [Install]
 WantedBy=multi-user.target
