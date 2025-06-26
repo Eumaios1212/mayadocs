@@ -54,7 +54,8 @@ install_packages() {
 install_go() {
   local go_ver="1.22.2"                               # update when Maya supports a newer Go
   local tar="go${go_ver}.linux-amd64.tar.gz"
-  local base="https://go.dev/dl"
+  local base="https://go.dev/dl"                    # For tarball
+  local checksum_base="https://storage.googleapis.com/golang"  # For checksum
 
   # Skip when this exact version is already present
   if command -v go >/dev/null 2>&1 && go version | grep -q "go${go_ver}"; then
@@ -62,27 +63,36 @@ install_go() {
     return 0
   fi
 
-  cd "$HOME" || return 1
+  cd "$HOME" || { failure "Cannot change to home directory"; return 1; }
 
   echo "[→] Downloading Go ${go_ver} …"
-  curl -fsSLO "${base}/${tar}" \
-    || { failure "Download failed"; return 1; }
-  curl -fsSLO "${base}/${tar}.sha256" \
-    || { failure "Checksum file download failed"; rm -f "$tar"; return 1; }
+  if ! curl -fsSLO "${base}/${tar}" || [[ ! -f "$tar" ]]; then
+    failure "Download failed"; return 1;
+  fi
+
+  echo "[→] Downloading checksum …"
+  if ! curl -fsSLO "${checksum_base}/${tar}.sha256" || [[ ! -f "${tar}.sha256" ]]; then
+    failure "Checksum file download failed"; rm -f "$tar"; return 1;
+  fi
+
+  # Validate checksum file content
+  if [[ ! -s "${tar}.sha256" ]] || ! grep -qE '^[0-9a-f]{64}$' "${tar}.sha256"; then
+    failure "Invalid checksum file content"; rm -f "$tar" "${tar}.sha256"; return 1;
+  fi
 
   echo "[→] Verifying checksum …"
-  sha256sum -c "${tar}.sha256" \
+  checksum=$(tr -d '\n\r' < "${tar}.sha256")
+  printf '%s  %s\n' "$checksum" "${tar}" | sha256sum -c - \
     || { failure "Checksum mismatch"; rm -f "$tar" "${tar}.sha256"; return 1; }
 
   echo "[→] Installing …"
   sudo rm -rf /usr/local/go
   sudo tar -C /usr/local -xzf "$tar" \
-    || { failure "Extraction failed"; return 1; }
+    || { failure "Extraction failed"; rm -f "$tar" "${tar}.sha256"; return 1; }
 
   rm -f "$tar" "${tar}.sha256"
   success "Go ${go_ver} installed successfully"
 }
-
 
 add_go_env() {
   local profile="$HOME/.bash_profile"
