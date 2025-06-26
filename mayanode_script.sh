@@ -87,8 +87,6 @@ EOF
   : "${LD_LIBRARY_PATH:=}"   # protect strict-mode shells that might source later
 }
 
-
-
 install_packages() {
   sudo apt-get update -y
   sudo apt-get install -y \
@@ -353,7 +351,8 @@ main() {
   run_step "Configure UFW firewall"             setup_ufw
   run_step "Enable & start Mayanode service"    enable_service
 
-  banner "All done! 🎉"
+  banner "All done!"
+  echo "Please reboot"
   echo "Use   sudo journalctl -feu mayanode   to follow logs."
 }
 
