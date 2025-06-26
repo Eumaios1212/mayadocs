@@ -172,7 +172,7 @@ install_mayanode() {
   fi
 
   # Clone + checkout tag/branch chosen interactively
-  git clone https://gitlab.com/mayachain/mayanode || {
+  git clone https://gitlab.com/mayachain/mayanode.git || {
     failure "Git clone failed"; return 1; }
   cd mayanode
   git fetch --tags --quiet
