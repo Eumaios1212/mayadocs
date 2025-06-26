@@ -238,85 +238,108 @@ install_binary() {
   fi
 }
 
-fetch_snapshot () {
-  set -e                     # exit immediately on any error
-  local SNAP_BUCKET="public-snapshots-mayanode"
-  local SNAP_CLASS           # will be set via the select below
 
-# Select full or pruned snapshot
+fetch_snapshot() {
+  set -e                                 # abort on any error
+  local SNAP_BUCKET="public-snapshots-mayanode"
+  local SNAP_CLASS height snap_url
+  local workdir="$HOME/.mayanode"        # extraction root we will later swap
+
+  # ── 1. Choose snapshot flavour ──────────────────────────────────────────
   echo -e "\nChoose snapshot type:"
   PS3=$'[?] Snapshot type → '
-  select SNAP_CLASS in pruned full; do
-      [[ -n "$SNAP_CLASS" ]] && break
-  done
+  select SNAP_CLASS in pruned full; do [[ -n $SNAP_CLASS ]] && break; done
 
-  if [[ "$SNAP_CLASS" == "full" ]]; then
-     echo -e "\n[i] ‘full’ snapshots are **very large** (≈ 750 GB)."
+  if [[ $SNAP_CLASS == full ]]; then
+    echo -e "\n[i] ‘full’ snapshots are **very large** (≈ 750 GB)."
   else
-     echo -e "\n[i] ‘pruned’ snapshots are slimmer (≈ 200 GB) – recommended for full nodes."
+    echo -e "\n[i] ‘pruned’ snapshots are slimmer (≈ 200 GB) – recommended for most nodes."
   fi
 
-  mkdir -p "$HOME/.mayanode/data"
+  mkdir -p "$workdir/data"
 
-  # Snapshot lookup
-  read -rp $'\n[?] Look up the latest snapshot height now? [y/N] ' ans
-  [[ "$ans" =~ ^[Yy]$ ]] || { echo "Aborted."; return 1; }
+  # ── 2. Find latest height ───────────────────────────────────────────────
+  if ! prompt "Look up the latest snapshot height now?"; then
+    echo "Snapshot step skipped"; return 0
+  fi
 
-  echo "[+] Fetching latest snapshot height from s3://${SNAP_BUCKET}/${SNAP_CLASS}/ …"
-  local height
+  echo "[+] Querying bucket …"
   height=$(aws s3 ls "s3://${SNAP_BUCKET}/${SNAP_CLASS}/" --no-sign-request |
            awk '{print $2}' | tr -d '/' | sort -n | tail -1)
 
-  if [[ -z "$height" ]]; then
-    echo "[✗] Could not determine snapshot height"; return 1
-  fi
+  [[ -n $height ]] || { failure "Could not determine snapshot height"; return 1; }
+  prompt "Latest snapshot is ${height}. Continue?" || { echo "Aborted."; return 1; }
 
-  # Confirm snapshot height
-  read -rp "[?] Latest snapshot appears to be ${height}. Use this? [Y/n] " ans
-  [[ "$ans" =~ ^[Nn]$ ]] && { echo "Aborted."; return 1; }
-
-  # Download snapshot
-  local snap_url="s3://${SNAP_BUCKET}/${SNAP_CLASS}/${height}/${height}.tar.gz"
-  echo "[+] Ready to download:  ${snap_url}"
-  read -rp "[?] Proceed with download? [y/N] " ans
-  [[ "$ans" =~ ^[Yy]$ ]] || { echo "Aborted."; return 1; }
-
-  echo "[→] Downloading …"
-  aws s3 cp "$snap_url" "$HOME/.mayanode/data" --no-sign-request
-
-  # Extract snapshot
-  echo "[+] Snapshot saved as ~/.mayanode/data/${height}.tar.gz"
-  read -rp "[?] Extract it into ~/.mayanode now? [y/N] " ans
-  [[ "$ans" =~ ^[Yy]$ ]] || { echo "Aborted."; return 1; }
-
-  tarball="$HOME/.mayanode/data/${height}.tar.gz"
-  if command -v pv >/dev/null; then
-      pv "$tarball" | tar xzf - -C "$HOME/.mayanode"
+  # ── 2b. Check free disk space before we download ────────────────────────
+  local required_gb free_gb
+  if [[ $SNAP_CLASS == full ]]; then
+    required_gb=800        # full snapshot size plus safety
   else
-      tar xzf "$tarball" -C "$HOME/.mayanode"
+    required_gb=250        # pruned snapshot size plus safety
   fi
-
-  # Integrity check
-  [[ -d "$HOME/.mayanode/data/application.db" ]] || {
-        echo "[✗] Snapshot extraction looks incomplete"; return 1; }
-  # Remove tarball
-  read -rp "[?] Delete the downloaded tarball to save space? [Y/n] " ans
-  if [[ ! "$ans" =~ ^[Nn]$ ]]; then
-    rm "$HOME/.mayanode/data/${height}.tar.gz"
-    echo "[✓] Tarball removed"
-  else
-    echo "[i] Tarball kept as ~/.mayanode/data/${height}.tar.gz"
-  fi
-
-  # Sanity-check
-  if [[ -d "$HOME/.mayanode/data/application.db" ]]; then
-    echo -e "\n[✓] Snapshot looks good. You can now start the service."
-    return 0
-  else
-    echo -e "\n[✗] application.db missing – something went wrong."
+  free_gb=$(df -BG "$workdir" | awk 'NR==2 {print int($4)}')
+  if (( free_gb < required_gb )); then
+    failure "Only ${free_gb} GB free; need at least ${required_gb} GB before downloading."
     return 1
   fi
+
+  # ── 3. Download while node is live ──────────────────────────────────────
+  snap_url="s3://${SNAP_BUCKET}/${SNAP_CLASS}/${height}/${height}.tar.gz"
+  local tmp_tar="$workdir/data/${height}.tar.gz.partial"
+  local final_tar="$workdir/data/${height}.tar.gz"
+
+  echo "[→] Downloading snapshot …"
+  aws s3 cp "$snap_url" "$tmp_tar" --no-sign-request
+  mv "$tmp_tar" "$final_tar"
+  echo "[✓] Download complete (${final_tar})"
+
+  # ── 4. Stop service only now ────────────────────────────────────────────
+  local service_was_running=false
+  if systemctl is-active --quiet mayanode; then
+    service_was_running=true
+    echo "[i] Stopping mayanode for safe extraction…"
+    sudo systemctl stop mayanode
+  fi
+
+  # ── 5. Extract into a fresh dir (strip leading 'data/') ────────────────
+  local newdir="$workdir/data.new"
+  local olddir="$workdir/data"
+  rm -rf "$newdir"
+  mkdir -p "$newdir"
+
+  echo "[→] Extracting into $newdir …"
+  if command -v pv >/dev/null; then
+    pv "$final_tar" | tar xzf - -C "$newdir" --strip-components=1
+  else
+    tar xzf "$final_tar" -C "$newdir" --strip-components=1
+  fi
+
+  [[ -d "$newdir/application.db" ]] || {
+    failure "Extraction incomplete"; rm -rf "$newdir";
+    $service_was_running && sudo systemctl start mayanode; return 1; }
+
+  # ── 6. Atomic swap & restart ────────────────────────────────────────────
+  local timestamp
+  timestamp=$(date +%Y%m%d-%H%M%S)
+  mv "$olddir" "${olddir}.backup-${timestamp}"
+  mv "$newdir" "$olddir"
+
+  echo "[✓] Snapshot swapped in. Backup kept at ${olddir}.backup-${timestamp}"
+
+  if $service_was_running; then
+    echo "[i] Restarting mayanode"
+    sudo systemctl start mayanode
+  fi
+
+  # ── 7. Optional cleanup ────────────────────────────────────────────────
+  if prompt "Delete the downloaded tarball to save space?"; then
+    rm -f "$final_tar"
+    echo "[✓] Tarball removed"
+  fi
+
+  success "Snapshot restore finished"
 }
+
 
 setup_ufw() {
   if ! dpkg -s ufw >/dev/null 2>&1; then
