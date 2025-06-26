@@ -4,6 +4,20 @@
 
 set -Eeuo pipefail     # Fail fast on errors, undefined vars, or pipeline errors.
 
+# ────────────────────────────────────────────────────────────────────────────
+# GLOBAL TRACE LOG – everything that runs after this point is logged
+# ────────────────────────────────────────────────────────────────────────────
+LOG_DIR="$HOME/mayanode-setup-logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/$(date +%Y%m%d-%H%M%S).log"
+
+# Optional: nicer PS4 prompt for `set -x` output
+export PS4='+ \D{%F %T} ${BASH_SOURCE##*/}:${LINENO}: '
+
+# Send *both* stdout & stderr to the terminal AND append to $LOG_FILE
+exec > >(tee -a "$LOG_FILE") 2>&1
+set -x
+
 # Pre-define LD_LIBRARY_PATH (empty) so 'set -u' won’t abort when it’s first expanded
 : "${LD_LIBRARY_PATH:=}"   # define as empty if it wasn’t set
 IFS=$'\n\t'
