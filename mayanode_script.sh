@@ -2,6 +2,14 @@
 # setup-mayanode.sh
 # Interactive, step‑by‑step mayanode installation
 
+
+# Prevent user fro running script as root
+if [[ $EUID -eq 0 ]]; then
+  echo "✗  Please run this script as a regular user who can sudo, not as root."
+  echo "   e.g.  chmod +x setup-mayanode.sh && ./setup-mayanode.sh"
+  exit 1
+fi
+
 set -Eeuo pipefail     # Fail fast on errors, undefined vars, or pipeline errors.
 
 # ────────────────────────────────────────────────────────────────────────────
