@@ -267,102 +267,88 @@ install_binary() {
 
 
 fetch_snapshot() {
-  set -e                                 # abort on any error
+  set -e
   local SNAP_BUCKET="public-snapshots-mayanode"
   local SNAP_CLASS height snap_url
-  local workdir="$HOME/.mayanode"        # extraction root we will later swap
+  local workdir="$HOME/.mayanode"        # root of all Maya data
+  local dbdir="$workdir/data"            # current database
+  mkdir -p "$dbdir"
 
-  # ── 1. Choose snapshot flavour ──────────────────────────────────────────
+  # ── 1. Snapshot flavour ────────────────────────────────────────────────
   echo -e "\nChoose snapshot type:"
   PS3=$'[?] Snapshot type → '
   select SNAP_CLASS in pruned full; do [[ -n $SNAP_CLASS ]] && break; done
+  [[ $SNAP_CLASS == full ]] && echo -e "\n[i] Full snapshots ≈ 750 GB." \
+                             || echo -e "\n[i] Pruned snapshots ≈ 200 GB."
 
-  if [[ $SNAP_CLASS == full ]]; then
-    echo -e "\n[i] ‘full’ snapshots are **very large** (≈ 750 GB)."
-  else
-    echo -e "\n[i] ‘pruned’ snapshots are slimmer (≈ 200 GB) – recommended for most nodes."
-  fi
-
-  mkdir -p "$workdir/data"
-
-  # ── 2. Find latest height ───────────────────────────────────────────────
-  if ! prompt "Look up the latest snapshot height now?"; then
-    echo "Snapshot step skipped"; return 0
-  fi
-
+  # ── 2. Latest height ───────────────────────────────────────────────────
+  prompt "Look up the latest snapshot height now?" || { echo "Skipped."; return 0; }
   echo "[+] Querying bucket …"
   height=$(aws s3 ls "s3://${SNAP_BUCKET}/${SNAP_CLASS}/" --no-sign-request |
            awk '{print $2}' | tr -d '/' | sort -n | tail -1)
-
   [[ -n $height ]] || { failure "Could not determine snapshot height"; return 1; }
   prompt "Latest snapshot is ${height}. Continue?" || { echo "Aborted."; return 1; }
 
-  # ── 2b. Check free disk space before we download ────────────────────────
+  # ── 2b. Free‑space guard ───────────────────────────────────────────────
   local required_gb free_gb
-  if [[ $SNAP_CLASS == full ]]; then
-    required_gb=800        # full snapshot size plus safety
-  else
-    required_gb=250        # pruned snapshot size plus safety
-  fi
+  if [[ $SNAP_CLASS == full ]]; then required_gb=800; else required_gb=250; fi
   free_gb=$(df -BG "$workdir" | awk 'NR==2 {print int($4)}')
-  if (( free_gb < required_gb )); then
-    failure "Only ${free_gb} GB free; need at least ${required_gb} GB before downloading."
-    return 1
-  fi
+  (( free_gb >= required_gb )) || {
+     failure "Only ${free_gb} GB free; need ${required_gb} GB."; return 1; }
 
-  # ── 3. Download while node is live ──────────────────────────────────────
+  # ── 3. Download (tarball saved in $workdir, NOT inside data/) ──────────
   snap_url="s3://${SNAP_BUCKET}/${SNAP_CLASS}/${height}/${height}.tar.gz"
-  local tmp_tar="$workdir/data/${height}.tar.gz.partial"
-  local final_tar="$workdir/data/${height}.tar.gz"
-
+  local tmp_tar="$workdir/${height}.tar.gz.partial"
+  local final_tar="$workdir/${height}.tar.gz"
   echo "[→] Downloading snapshot …"
   aws s3 cp "$snap_url" "$tmp_tar" --no-sign-request
   mv "$tmp_tar" "$final_tar"
-  echo "[✓] Download complete (${final_tar})"
+  echo "[✓] Download complete → ${final_tar}"
 
-  # ── 4. Stop service only now ────────────────────────────────────────────
-  local service_was_running=false
+  # ── 4. Stop service only now ───────────────────────────────────────────
+  local running=false
   if systemctl is-active --quiet mayanode; then
-    service_was_running=true
-    echo "[i] Stopping mayanode for safe extraction…"
+    running=true
+    echo "[i] Stopping mayanode for safe extraction …"
     sudo systemctl stop mayanode
   fi
 
-  # ── 5. Extract into a fresh dir (strip leading 'data/') ────────────────
-  local newdir="$workdir/data.new"
-  local olddir="$workdir/data"
-  rm -rf "$newdir"
-  mkdir -p "$newdir"
-
-  echo "[→] Extracting into $newdir …"
-  if command -v pv >/dev/null; then
-    pv "$final_tar" | tar xzf - -C "$newdir" --strip-components=1
+  # ── 5. Decide strip depth (1 or 2) by peeking into the tarball ─────────
+  local strip_depth
+  if tar tzf "$final_tar" | head -1 | grep -qE '^[0-9]+/data/'; then
+    strip_depth=2          # <height>/data/…
   else
-    tar xzf "$final_tar" -C "$newdir" --strip-components=1
+    strip_depth=1          # data/…
   fi
 
+  # ── 6. Extract into fresh dir ──────────────────────────────────────────
+  local newdir="$workdir/data.new"
+  rm -rf "$newdir" && mkdir -p "$newdir"
+  echo "[→] Extracting with --strip-components=${strip_depth} …"
+  if command -v pv >/dev/null; then
+    pv -f "$final_tar" | tar xzf - -C "$newdir" --strip-components="$strip_depth"
+  else
+    tar xzf "$final_tar" -C "$newdir" --strip-components="$strip_depth"
+  fi
   [[ -d "$newdir/application.db" ]] || {
-    failure "Extraction incomplete"; rm -rf "$newdir";
-    $service_was_running && sudo systemctl start mayanode; return 1; }
+      failure "Extraction incomplete"; rm -rf "$newdir";
+      $running && sudo systemctl start mayanode; return 1; }
 
-  # ── 6. Atomic swap & restart ────────────────────────────────────────────
-  local timestamp
-  timestamp=$(date +%Y%m%d-%H%M%S)
-  mv "$olddir" "${olddir}.backup-${timestamp}"
-  mv "$newdir" "$olddir"
-
-  echo "[✓] Snapshot swapped in. Backup kept at ${olddir}.backup-${timestamp}"
-
-  if $service_was_running; then
-    echo "[i] Restarting mayanode"
-    sudo systemctl start mayanode
+  # ── 7. Swap database; backup only if an old DB exists ──────────────────
+  local timestamp; timestamp=$(date +%Y%m%d-%H%M%S)
+  if [[ -d "$dbdir/application.db" ]]; then
+    mv "$dbdir" "${dbdir}.backup-${timestamp}"
+    echo "[i] Existing DB moved to ${dbdir}.backup-${timestamp}"
+  else
+    rm -rf "$dbdir"
   fi
+  mv "$newdir" "$dbdir"
+  echo "[✓] Snapshot in place."
 
-  # ── 7. Optional cleanup ────────────────────────────────────────────────
-  if prompt "Delete the downloaded tarball to save space?"; then
-    rm -f "$final_tar"
-    echo "[✓] Tarball removed"
-  fi
+  $running && { echo "[i] Restarting mayanode"; sudo systemctl start mayanode; }
+
+  # ── 8. Optional cleanup ────────────────────────────────────────────────
+  prompt "Delete downloaded tarball to save space?" && rm -f "$final_tar"
 
   success "Snapshot restore finished"
 }
