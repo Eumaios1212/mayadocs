@@ -16,29 +16,42 @@ fi
 
 set -Eeuo pipefail     # Fail fast on errors, undefined vars, or pipeline errors.
 
-# ────────────────────────────────────────────────────────────────────────────
-# GLOBAL TRACE LOG – everything that runs after this point is logged
-# ────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# Pretty-printing helpers — *must* come before we redirect stdout so that
+# `tput` still talks to a real TTY and captures colour escape codes.
+# -----------------------------------------------------------------------------
+GREEN=$(tput setaf 2)
+RED=$(tput setaf 9)
+YELLOW=$(tput setaf 11)
+RESET=$(tput sgr0)
+
+# -----------------------------------------------------------------------------
+# Quiet trace-logging:
+#   • Full `set -x` output → file only (FD 9)
+#   • Normal stdout/stderr → terminal *and* file (via tee)
+# -----------------------------------------------------------------------------
 LOG_DIR="$HOME/mayanode-setup-logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/$(date +%Y%m%d-%H%M%S).log"
 
-# Optional: nicer PS4 prompt for `set -x` output
-export PS4='+ \D{%F %T} ${BASH_SOURCE##*/}:${LINENO}: '
 
-# Send *both* stdout & stderr to the terminal AND append to $LOG_FILE
+# 1) open FD 9 to the log and route bash xtrace there
+exec 9>>"$LOG_FILE"
+export BASH_XTRACEFD=9
+set -x            # tracing is active (file only)
+
+# 2) duplicate regular output to both terminal and log
 exec > >(tee -a "$LOG_FILE") 2>&1
-set -x
 
-# Pre-define LD_LIBRARY_PATH (empty) so 'set -u' won’t abort when it’s first expanded
-: "${LD_LIBRARY_PATH:=}"   # define as empty if it wasn’t set
+# -----------------------------------------------------------------------------
+# Misc early shell safety-nets
+# -----------------------------------------------------------------------------
+: "${LD_LIBRARY_PATH:=}"          # define as empty if it wasn’t set
 IFS=$'\n\t'
 
 ###############################################################################
-# Pretty‑printing helpers
+# Pretty-printing convenience functions
 ###############################################################################
-GREEN=$(tput setaf 2)  RED=$(tput setaf 9)  YELLOW=$(tput setaf 11)  RESET=$(tput sgr0)
-
 banner()        { printf "\n${YELLOW}==> %s${RESET}\n" "$*"; }
 success()       { printf "${GREEN}✓ %s${RESET}\n" "$*"; }
 failure()       { printf "${RED}✗ %s${RESET}\n" "$*"; }
