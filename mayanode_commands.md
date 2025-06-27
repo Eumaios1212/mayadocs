@@ -4,26 +4,24 @@
 
 
 ```bash
-mayanode status --node tcp://localhost:27147 \
-  | jq .
+mayanode status | jq .
 ```
 
 ### Current network (mainnet / stagenet / testnet):
 
 ```bash
-mayanode status --node tcp://localhost:27147 \
-  | jq '.NodeInfo.network'
+mayanode status | jq '.NodeInfo.network'
 ```
 
 ### Height and sync status:
 ```bash
-mayanode status --node tcp://localhost:27147 \
+mayanode status \
      | jq '.SyncInfo | {height: .latest_block_height, catching_up}'
 ```
 
 ### Node address & voting power (0 → not a validator)
 ```bash
-mayanode status --node tcp://localhost:27147 \
+mayanode status \
   | jq '.ValidatorInfo | {address: .Address, voting_power: .VotingPower|tonumber}'
 ```
 
