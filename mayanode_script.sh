@@ -3,7 +3,11 @@
 # Interactive, step‑by‑step mayanode installation
 
 
-# Prevent user fro running script as root
+# -----------------------------------------------------------------------------
+# Abort if the script is run **as root**. Always invoke it as an unprivileged
+# user who can sudo when prompted; otherwise $HOME resolves to /root and
+# binaries & paths end up in the wrong place.
+# -----------------------------------------------------------------------------
 if [[ $EUID -eq 0 ]]; then
   echo "✗  Please run this script as a regular user who can sudo, not as root."
   echo "   e.g.  chmod +x setup-mayanode.sh && ./setup-mayanode.sh"
@@ -429,8 +433,8 @@ main() {
   run_step "Enable & start Mayanode service"    enable_service
 
   banner "All done!"
-  echo "Please reboot"
   echo "Use sudo journalctl -feu mayanode to follow logs."
+  echo "Please reboot"
 }
 
 main "$@"
