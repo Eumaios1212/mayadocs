@@ -150,8 +150,6 @@ case ":$PATH:" in
   *) PATH=$PATH:/usr/local/go/bin:$HOME/go/bin ;;
 esac
 export PATH
-
-export LD_LIBRARY_PATH=${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}$HOME/mayanode/lib
 EOF
 
   # Persist to both startup files (only once, via the marker)
@@ -163,10 +161,34 @@ EOF
 
   # Make the variables live for the remainder of this install run
   eval "$env_block"
+}
+
+add_mayanode_env() {
+  local profile="$HOME/.bash_profile"
+  local bashrc="$HOME/.bashrc"
+  touch "$profile" "$bashrc"
+
+  local marker="# >>> MAYANODE-ENV >>>"
+  read -r -d '' env_block <<'EOF'
+# ── Mayanode environment variables ───────────────────────────────────────
+# LD_LIBRARY_PATH for Radix & ZCash libraries
+# MAYANODE_NODE for the Tendermint RPC endpoint
+export LD_LIBRARY_PATH=${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}$HOME/mayanode/lib
+export MAYANODE_NODE="tcp://localhost:27147"
+EOF
+
+  # Persist to both startup files (only once, via the marker)
+  for f in "$profile" "$bashrc"; do
+    grep -qF "$marker" "$f" || {
+      printf '%s\n%s\n# <<< MAYANODE-ENV <<<' "$marker" "$env_block" >>"$f"
+    }
+  done
+
+  # Make the variables live for the remainder of this install run
+  eval "$env_block"
 
   : "${LD_LIBRARY_PATH:=}"   # protect strict-mode shells that might source later
 }
-
 install_docker() {
   sudo mkdir -p /etc/apt/keyrings
   curl -fsSL https://download.docker.com/linux/ubuntu/gpg |
@@ -422,6 +444,7 @@ main() {
   run_step "Install required apt packages"      install_packages
   run_step "Install Go"                         install_go
   run_step "Add Go env vars"                    add_go_env
+  run_step "Add Mayanode env vars"              add_mayanode_env
   run_step "Install Docker & Compose"           install_docker
   run_step "Install AWS CLI"                    install_aws_cli
   run_step "Clone / build Mayanode"             install_mayanode
