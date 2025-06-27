@@ -1,13 +1,18 @@
 # Important Commands for Mayanode
 
-### Top-level JSON object and all its nested fields
+### Top-level status object (everything)
+
 
 ```bash
-mayanode status --node tcp://localhost:27147 | jq .
+mayanode status --node tcp://localhost:27147 \
+  | jq .
 ```
-### Current network
+
+### Current network (mainnet / stagenet / testnet):
+
 ```bash
-mayanode status --node tcp://localhost:27147 | jq '.NodeInfo.network'
+mayanode status --node tcp://localhost:27147 \
+  | jq '.NodeInfo.network'
 ```
 
 ### Height and sync status:
@@ -22,14 +27,29 @@ mayanode status --node tcp://localhost:27147 \
   | jq '.ValidatorInfo | {address: .Address, voting_power: .VotingPower|tonumber}'
 ```
 
-## Connected seed nodes by Tendermint peer ID @ IP address:
+### Peer count
+```bash
+curl -s http://localhost:27147/net_info \
+  | jq '.result.n_peers'
+```
+
+### Block time lag (how many seconds you trail the network)
+```bash
+curl -s http://localhost:27147/status \
+  | jq '.result.sync_info.latest_block_time' -r \
+  | xargs -I{} date -d {} +%s \
+  | awk -v now=$(date +%s) '{print now - $1 " s behind"}'
+```
+
+
+### Connected peers: TendermintID@IP
 ```bash
 curl -s http://localhost:27147/net_info \
   | jq '.result.peers
         | map("\(.node_info.id)@\(.remote_ip):27146")'
 ```
 
-## Tag the chain is running:
+## Chain tag peers are running: ***NO OUTPUT***
 ```bash
 curl -s http://localhost:27147/net_info \
 | jq -r '.result.peers[]
@@ -37,7 +57,7 @@ curl -s http://localhost:27147/net_info \
 | sort -u
 ```
 
-## Current proposer & round step
+## Current proposer & round/step
 ```bash
 curl -s http://localhost:27147/dump_consensus_state \
   | jq -r '.result.round_state.height_round_step'
