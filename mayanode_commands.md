@@ -1,6 +1,6 @@
 # Important Commands for Mayanode
 
-## Top-level JSON object and all its nested fields
+### Top-level JSON object and all its nested fields
 
 ```bash
 mayanode status --node tcp://localhost:27147 | jq .
