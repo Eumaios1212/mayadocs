@@ -1,5 +1,7 @@
 # Important Commands for Mayanode
 
+## MAYAChain ABCI: Application layer
+
 ### Top-level status object (everything)
 
 
@@ -25,6 +27,8 @@ mayanode status \
   | jq '.ValidatorInfo | {address: .Address, voting_power: .VotingPower|tonumber}'
 ```
 
+## Tendermint / CometBFT RPC:  Consensus + P2P infrastructure layer
+
 ### Peer count
 ```bash
 curl -s http://localhost:27147/net_info \
@@ -47,7 +51,7 @@ curl -s http://localhost:27147/net_info \
         | map("\(.node_info.id)@\(.remote_ip):27146")'
 ```
 
-## Chain tag peers are running: ***NO OUTPUT***
+### Chain tag peers are running: ***NO OUTPUT***
 ```bash
 curl -s http://localhost:27147/net_info \
 | jq -r '.result.peers[]
@@ -55,12 +59,12 @@ curl -s http://localhost:27147/net_info \
 | sort -u
 ```
 
-## Current proposer & round/step
+### Current proposer & round/step
 ```bash
 curl -s http://localhost:27147/dump_consensus_state \
   | jq -r '.result.round_state.height_round_step'
 ```
-## All pools – giant JSON array
+### All pools – giant JSON array
 
 ```bash
 curl -s http://localhost:1317/mayachain/pools | jq .
@@ -69,23 +73,59 @@ curl -s http://localhost:1317/mayachain/pools | jq .
 curl -s http://localhost:1317/mayachain/pools | jq '.[0,1]'   # show first 2 entries
 ```
 
-## Size of LevelDBs (quick disk-usage check)
+### Size of LevelDBs (quick disk-usage check)
 ```bash
 du -sh ~/.mayanode/data/*db
 ```
 
-## RAM & CPU for the running process
+## System monitoring
+
+### RAM & CPU for the running process
 ```bash
 PID=$(pgrep -f "mayanode start" | head -n1)
 ps -p "$PID" -o rss,pmem,pcpu,etime,cmd
-
 ```
-## Filter logs
+
+### `journalctl` logs for mayanode service
+
+#### Show all logs
+```bash
+journalctl -u mayanode
+```
+
+#### Show latest logs
+```bash
+journalctl -u mayanode -r
+```
+
+#### Follow logs in real-time
+```bash
+journalctl -u mayanode -f
+```
+
+#### See what happened yesterday
+```bash
+journalctl -u mayanode --since yesterday
+```
+
+#### Show only WARNING and higher
+
+```bash
+journalctl -u mayanode -p warning
+```
+
+#### Save the last two weeks of logs to a file
+
+```bash
+journalctl -u mayanode --since "-14d" > mayanode_last14d.log
+```
+
+#### Filter logs
 ```bash
 journalctl -u mayanode -f \
   | grep -v -e 'MsgTssKeysignFail' \
             -e 'cleaning pending liquidity'
-````
+```
 
 # Upgrade Mayanode
 
