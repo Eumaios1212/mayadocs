@@ -46,7 +46,6 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 # -----------------------------------------------------------------------------
 # Misc early shell safety-nets
 # -----------------------------------------------------------------------------
-: "${LD_LIBRARY_PATH:=}"          # define as empty if it wasn’t set
 IFS=$'\n\t'
 
 ###############################################################################
@@ -91,46 +90,67 @@ install_packages() {
 }
 
 install_go() {
-  local go_ver="1.22.2"                               # update when Maya supports a newer Go
-  local tar="go${go_ver}.linux-amd64.tar.gz"
-  local base="https://go.dev/dl"                    # For tarball
-  local checksum_base="https://storage.googleapis.com/golang"  # For checksum
+  local wanted_ver="1.22.2"         # tarball version to fetch if chosen
+  local min_ver="1.22"              # lowest acceptable version
 
-  # Skip when this exact version is already present
-  if command -v go >/dev/null 2>&1 && go version | grep -q "go${go_ver}"; then
-    echo "[i] Go ${go_ver} already installed – skipping."
+  echo -e "\nChoose how to install Go:"
+  select go_src in \
+         "Ubuntu apt (whatever is current)" \
+         "Official tarball ${wanted_ver}" ; do
+    [[ -n $go_src ]] && break
+  done
+
+  # ---------------------------------------------------------------------------
+  # 1) Ubuntu repository
+  # ---------------------------------------------------------------------------
+  if [[ $REPLY == 1 ]]; then
+    banner "Installing Go from your distro repositories"
+    sudo apt-get install -y golang-go
+
+    if ! command -v go >/dev/null; then
+      failure "go binary not found after apt install"; return 1
+    fi
+    local have
+    have=$(go version | awk '{print $3}' | sed 's/^go//')
+    if [[ $(printf '%s\n' "$min_ver" "$have" | sort -V | head -1) != "$min_ver" ]]; then
+      failure "Ubuntu’s go ($have) is older than $min_ver"
+      echo "Re‑run the installer and pick the tarball option instead."
+      return 1
+    fi
+    success "Go ${have} installed via apt"
     return 0
   fi
 
-  cd "$HOME" || { failure "Cannot change to home directory"; return 1; }
+  # ---------------------------------------------------------------------------
+  # 2) Official tarball (download & verify)
+  # ---------------------------------------------------------------------------
+  banner "Installing Go ${wanted_ver} from official tarball"
 
-  echo "[→] Downloading Go ${go_ver} …"
-  if ! curl -fsSLO "${base}/${tar}" || [[ ! -f "$tar" ]]; then
-    failure "Download failed"; return 1;
+  cd "$HOME" || { failure "cannot cd \$HOME"; return 1; }
+
+  local base="https://dl.google.com/go"   # ← raw files (no HTML wrapper)
+  local tar="go${wanted_ver}.linux-amd64.tar.gz"
+  local url="${base}/${tar}"
+  local sum_url="${url}.sha256"
+
+  echo "[→] Downloading tarball …"
+  curl -# -O "${url}" || { failure "tarball download failed"; return 1; }
+
+  echo "[→] Fetching checksum …"
+  curl -s  -O "${sum_url}" \
+        || { failure "checksum download failed"; rm -f "${tar}"; return 1; }
+
+  echo "[→] Verifying …"
+  if ! sha256sum -c <(echo "$(cat "${tar}.sha256")  ${tar}") ; then
+    failure "Checksum mismatch"; rm -f "${tar}" "${tar}.sha256"; return 1;
   fi
 
-  echo "[→] Downloading checksum …"
-  if ! curl -fsSLO "${checksum_base}/${tar}.sha256" || [[ ! -f "${tar}.sha256" ]]; then
-    failure "Checksum file download failed"; rm -f "$tar"; return 1;
-  fi
-
-  # Validate checksum file content
-  if [[ ! -s "${tar}.sha256" ]] || ! grep -qE '^[0-9a-f]{64}$' "${tar}.sha256"; then
-    failure "Invalid checksum file content"; rm -f "$tar" "${tar}.sha256"; return 1;
-  fi
-
-  echo "[→] Verifying checksum …"
-  checksum=$(tr -d '\n\r' < "${tar}.sha256")
-  printf '%s  %s\n' "$checksum" "${tar}" | sha256sum -c - \
-    || { failure "Checksum mismatch"; rm -f "$tar" "${tar}.sha256"; return 1; }
-
-  echo "[→] Installing …"
   sudo rm -rf /usr/local/go
-  sudo tar -C /usr/local -xzf "$tar" \
-    || { failure "Extraction failed"; rm -f "$tar" "${tar}.sha256"; return 1; }
+  sudo tar -C /usr/local -xzf "${tar}" \
+        || { failure "tar extraction failed"; return 1; }
 
-  rm -f "$tar" "${tar}.sha256"
-  success "Go ${go_ver} installed successfully"
+  rm -f "${tar}" "${tar}.sha256"
+  success "Go ${wanted_ver} installed to /usr/local/go"
 }
 
 add_go_env() {
@@ -138,29 +158,43 @@ add_go_env() {
   local bashrc="$HOME/.bashrc"
   touch "$profile" "$bashrc"
 
-  local marker="# >>> MAYANODE-GO-ENV >>>"
-  read -r -d '' env_block <<'EOF'
-export GOROOT=/usr/local/go
+  local start="# >>> MAYANODE-GO-ENV >>>"
+  local end="# <<< MAYANODE-GO-ENV <<<"
+
+  # Fresh content we want in both files
+  read -r -d '' new_block <<'EOF'
+# ----- Go tool‑chain ----------------------------------------------------
+if [ -d /usr/local/go ]; then
+  export GOROOT=/usr/local/go         # tarball install
+elif [ -d /usr/lib/go ]; then
+  export GOROOT=/usr/lib/go           # distro install
+fi
+
 export GOPATH=$HOME/go
 export GO111MODULE=on
 
-# ── append Go paths only once ──
 case ":$PATH:" in
-  *:/usr/local/go/bin:*) ;;         # already present – do nothing
-  *) PATH=$PATH:/usr/local/go/bin:$HOME/go/bin ;;
+  *:$GOROOT/bin:*) ;;                 # already present
+  *) [ -d "$GOROOT/bin" ] && PATH=$GOROOT/bin:$HOME/go/bin:$PATH ;;
 esac
 export PATH
 EOF
 
-  # Persist to both startup files (only once, via the marker)
-  for f in "$profile" "$bashrc"; do
-    grep -qF "$marker" "$f" || {
-      printf '%s\n%s\n# <<< MAYANODE-GO-ENV <<<' "$marker" "$env_block" >>"$f"
-    }
-  done
+  # function to (re)write one shell start‑up file
+  update_file() {
+    local file=$1
+    if grep -qF "$start" "$file"; then
+      # delete everything between the markers first
+      sed -i "/$start/,/$end/d" "$file"
+    fi
+    printf "%s\n%s\n%s\n" "$start" "$new_block" "$end" >>"$file"
+  }
 
-  # Make the variables live for the remainder of this install run
-  eval "$env_block"
+  update_file "$profile"
+  update_file "$bashrc"
+
+  # Apply to current process
+  eval "$new_block"
 }
 
 add_mayanode_env() {
@@ -171,9 +205,7 @@ add_mayanode_env() {
   local marker="# >>> MAYANODE-ENV >>>"
   read -r -d '' env_block <<'EOF'
 # ── Mayanode environment variables ───────────────────────────────────────
-# LD_LIBRARY_PATH for Radix & ZCash libraries
 # MAYANODE_NODE for the Tendermint RPC endpoint
-export LD_LIBRARY_PATH=${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}$HOME/mayanode/lib
 export MAYANODE_NODE="tcp://localhost:27147"
 EOF
 
@@ -186,9 +218,8 @@ EOF
 
   # Make the variables live for the remainder of this install run
   eval "$env_block"
-
-  : "${LD_LIBRARY_PATH:=}"   # protect strict-mode shells that might source later
 }
+
 install_docker() {
   sudo mkdir -p /etc/apt/keyrings
   curl -fsSL https://download.docker.com/linux/ubuntu/gpg |
@@ -257,12 +288,11 @@ After=network-online.target
 [Service]
 User=${user}
 WorkingDirectory=/home/${user}/mayanode
-ExecStartPre=/home/${user}/go/bin/mayanode render-config
-ExecStart=/home/${user}/go/bin/mayanode start
+ExecStartPre=/usr/local/bin/mayanode render-config
+ExecStart=/usr/local/bin/mayanode start
 Restart=always
 RestartSec=3
 LimitNOFILE=4096
-Environment="LD_LIBRARY_PATH=/home/${user}/mayanode/lib"
 Environment="MAYA_COSMOS_TELEMETRY_ENABLED=true"
 Environment="CHAIN_ID=mayachain-mainnet-v1"
 Environment="NET=mainnet"
@@ -287,6 +317,13 @@ install_binary() {
   echo "[i] Installed mayanode → /usr/local/bin/mayanode"
 }
 
+configure_shared_libs() {
+  local libdir="$HOME/mayanode/lib"
+
+  # create conf atomically & idempotently
+  echo "$libdir" | sudo tee /etc/ld.so.conf.d/mayanode.conf >/dev/null
+  sudo ldconfig
+}
 
 fetch_snapshot() {
   set -e
@@ -300,8 +337,9 @@ fetch_snapshot() {
   echo -e "\nChoose snapshot type:"
   PS3=$'[?] Snapshot type → '
   select SNAP_CLASS in pruned full; do [[ -n $SNAP_CLASS ]] && break; done
-  [[ $SNAP_CLASS == full ]] && echo -e "\n[i] Full snapshots ≈ 750 GB." \
-                             || echo -e "\n[i] Pruned snapshots ≈ 200 GB."
+  [[ $SNAP_CLASS == full ]] \
+        && echo -e "\n[i] Full snapshots ≈ 750 GB." \
+        || echo -e "\n[i] Pruned snapshots ≈ 200 GB."
 
   # ── 2. Latest height ───────────────────────────────────────────────────
   prompt "Look up the latest snapshot height now?" || { echo "Skipped."; return 0; }
@@ -316,9 +354,9 @@ fetch_snapshot() {
   if [[ $SNAP_CLASS == full ]]; then required_gb=800; else required_gb=250; fi
   free_gb=$(df -BG "$workdir" | awk 'NR==2 {print int($4)}')
   (( free_gb >= required_gb )) || {
-     failure "Only ${free_gb} GB free; need ${required_gb} GB."; return 1; }
+       failure "Only ${free_gb} GB free; need ${required_gb} GB."; return 1; }
 
-  # ── 3. Download (tarball saved in $workdir, NOT inside data/) ──────────
+  # ── 3. Download tarball ────────────────────────────────────────────────
   snap_url="s3://${SNAP_BUCKET}/${SNAP_CLASS}/${height}/${height}.tar.gz"
   local tmp_tar="$workdir/${height}.tar.gz.partial"
   local final_tar="$workdir/${height}.tar.gz"
@@ -327,7 +365,13 @@ fetch_snapshot() {
   mv "$tmp_tar" "$final_tar"
   echo "[✓] Download complete → ${final_tar}"
 
-  # ── 4. Stop service only now ───────────────────────────────────────────
+  # ── 3b. Ask whether to proceed with extraction NOW ─────────────────────
+  if ! prompt "Extract & apply the snapshot now? (node will be stopped)"; then
+      echo "[i] Extraction postponed.  Keep ${final_tar} and run this function later."
+      return 0
+  fi
+
+  # ── 4. Stop running service ────────────────────────────────────────────
   local running=false
   if systemctl is-active --quiet mayanode; then
     running=true
@@ -338,9 +382,9 @@ fetch_snapshot() {
   # ── 5. Decide strip depth (1 or 2) by peeking into the tarball ─────────
   local strip_depth
   if tar tzf "$final_tar" | head -1 | grep -qE '^[0-9]+/data/'; then
-    strip_depth=2          # <height>/data/…
+      strip_depth=2          # <height>/data/…
   else
-    strip_depth=1          # data/…
+      strip_depth=1          # data/…
   fi
 
   # ── 6. Extract into fresh dir ──────────────────────────────────────────
@@ -348,21 +392,21 @@ fetch_snapshot() {
   rm -rf "$newdir" && mkdir -p "$newdir"
   echo "[→] Extracting with --strip-components=${strip_depth} …"
   if command -v pv >/dev/null; then
-    pv -f "$final_tar" | tar xzf - -C "$newdir" --strip-components="$strip_depth"
+      pv -f "$final_tar" | tar xzf - -C "$newdir" --strip-components="$strip_depth"
   else
-    tar xzf "$final_tar" -C "$newdir" --strip-components="$strip_depth"
+      tar xzf "$final_tar" -C "$newdir" --strip-components="$strip_depth"
   fi
   [[ -d "$newdir/application.db" ]] || {
-      failure "Extraction incomplete"; rm -rf "$newdir";
-      $running && sudo systemctl start mayanode; return 1; }
+        failure "Extraction incomplete"; rm -rf "$newdir";
+        $running && sudo systemctl start mayanode; return 1; }
 
   # ── 7. Swap database; backup only if an old DB exists ──────────────────
   local timestamp; timestamp=$(date +%Y%m%d-%H%M%S)
   if [[ -d "$dbdir/application.db" ]]; then
-    mv "$dbdir" "${dbdir}.backup-${timestamp}"
-    echo "[i] Existing DB moved to ${dbdir}.backup-${timestamp}"
+      mv "$dbdir" "${dbdir}.backup-${timestamp}"
+      echo "[i] Existing DB moved to ${dbdir}.backup-${timestamp}"
   else
-    rm -rf "$dbdir"
+      rm -rf "$dbdir"
   fi
   mv "$newdir" "$dbdir"
   echo "[✓] Snapshot in place."
@@ -374,6 +418,7 @@ fetch_snapshot() {
 
   success "Snapshot restore finished"
 }
+
 
 
 setup_ufw() {
@@ -450,13 +495,21 @@ main() {
   run_step "Clone / build Mayanode"             install_mayanode
   run_step "Create systemd service"             create_service
   run_step "Install Mayanode binary"            install_binary
+  run_step "Configure shared libraries"         configure_shared_libs
   run_step "Fetch & extract latest snapshot"    fetch_snapshot
   run_step "Configure UFW firewall"             setup_ufw
   run_step "Enable & start Mayanode service"    enable_service
 
   banner "All done!"
+  echo "Please reboot or run 'source ~/.bash_profile && source ~/.bashrc' to apply the environment changes."
   echo "Use sudo journalctl -feu mayanode to follow logs."
-  echo "Please reboot"
+
 }
+
+if [[ $BASH_SOURCE == "$0" ]]; then
+  # Ensure environment is set without sourcing potentially problematic files
+  export PATH="$PATH:$HOME/go/bin:/usr/local/bin"
+  export MAYANODE_NODE="tcp://localhost:27147"
+fi
 
 main "$@"
