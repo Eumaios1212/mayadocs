@@ -577,4 +577,11 @@ if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
   export MAYANODE_NODE="tcp://localhost:27147"
 fi
 
+# ────────────────────────── Cleanup On Exit ──────────────────────────────
+cleanup() {
+  set +x           # stop x-trace so nothing else writes to FD 9
+  exec 9>&-        # close FD 9 → flushes & releases $LOG_FILE handle
+}
+trap cleanup EXIT
+
 main "$@"
