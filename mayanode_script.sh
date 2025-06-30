@@ -1,56 +1,37 @@
 #!/usr/bin/env bash
 # setup-mayanode.sh
-# Interactive, step‑by‑step mayanode installation
+# Interactive, Step-by-Step Mayanode Installation
 
-
-# -----------------------------------------------------------------------------
-# Abort if the script is run **as root**. Always invoke it as an unprivileged
-# user who can sudo when prompted; otherwise $HOME resolves to /root and
-# binaries & paths end up in the wrong place.
-# -----------------------------------------------------------------------------
+# ───────────────────────── Abort If Run As Root ────────────────────────────
+# Always invoke as an unprivileged user who can sudo when prompted.
 if [[ $EUID -eq 0 ]]; then
   echo "✗  Please run this script as a regular user who can sudo, not as root."
   echo "   e.g.  chmod +x setup-mayanode.sh && ./setup-mayanode.sh"
   exit 1
 fi
 
-set -Eeuo pipefail     # Fail fast on errors, undefined vars, or pipeline errors.
+set -Eeuo pipefail  # Fail fast on errors, undefined vars, or pipeline errors.
 
-# -----------------------------------------------------------------------------
-# Pretty-printing helpers — *must* come before we redirect stdout so that
-# `tput` still talks to a real TTY and captures colour escape codes.
-# -----------------------------------------------------------------------------
+# ─────────────────────── Pretty-Printing Helpers ──────────────────────────
 GREEN=$(tput setaf 2)
 RED=$(tput setaf 9)
 YELLOW=$(tput setaf 11)
 RESET=$(tput sgr0)
 
-# -----------------------------------------------------------------------------
-# Quiet trace-logging:
-#   • Full `set -x` output → file only (FD 9)
-#   • Normal stdout/stderr → terminal *and* file (via tee)
-# -----------------------------------------------------------------------------
+# ─────────────────────────── Logging Setup ────────────────────────────────
 LOG_DIR="$HOME/mayanode-setup-logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/$(date +%Y%m%d-%H%M%S).log"
 
-
-# 1) open FD 9 to the log and route bash xtrace there
 exec 9>>"$LOG_FILE"
 export BASH_XTRACEFD=9
-set -x            # tracing is active (file only)
-
-# 2) duplicate regular output to both terminal and log
+set -x  # Tracing is active (file only)
 exec > >(tee -a "$LOG_FILE") 2>&1
 
-# -----------------------------------------------------------------------------
-# Misc early shell safety-nets
-# -----------------------------------------------------------------------------
+# ────────────────────────── Shell Safety-Nets ─────────────────────────────
 IFS=$'\n\t'
 
-###############################################################################
-# Pretty-printing convenience functions
-###############################################################################
+# ──────────────── Pretty-Printing Convenience Functions ───────────────────
 banner()        { printf "\n${YELLOW}==> %s${RESET}\n" "$*"; }
 success()       { printf "${GREEN}✓ %s${RESET}\n" "$*"; }
 failure()       { printf "${RED}✗ %s${RESET}\n" "$*"; }
@@ -61,9 +42,7 @@ prompt() {
   [[ "$reply" =~ ^[Yy]$ ]]
 }
 
-###############################################################################
-# Utility for guarded execution of a *named* function
-###############################################################################
+# ─────────── Utility for Guarded Execution of a Named Function ────────────
 run_step() {
   local step_name=$1; shift
   banner "$step_name"
@@ -79,9 +58,14 @@ run_step() {
   fi
 }
 
-###############################################################################
-# Step functions
-###############################################################################
+# ─────────────────────────── Step Functions ───────────────────────────────
+
+# --------------------------------------------------------------------------
+# install_packages
+# • Installs all OS-level prerequisites via apt (compiler, proto, lz4, etc.)
+# • Idempotent: safe to run multiple times
+# • Exits non-zero on failure (run_step will catch it)
+# --------------------------------------------------------------------------
 install_packages() {
   sudo apt-get update -y
   sudo apt-get install -y \
@@ -89,6 +73,14 @@ install_packages() {
        pv gawk linux-headers-generic ca-certificates gnupg lsb-release lz4 unzip
 }
 
+# --------------------------------------------------------------------------
+# install_go
+# • Interactively installs the Go tool-chain
+# • Lets the user choose between distro package and official tarball
+# • Verifies minimum version (>= 1.22) and checksum when using tarball
+# • Leaves /usr/local/go ready and returns non-zero on failure
+# • Not idempotent: overwrites any existing /usr/local/go
+# --------------------------------------------------------------------------
 install_go() {
   local wanted_ver="1.22.2"         # tarball version to fetch if chosen
   local min_ver="1.22"              # lowest acceptable version
@@ -100,9 +92,7 @@ install_go() {
     [[ -n $go_src ]] && break
   done
 
-  # ---------------------------------------------------------------------------
   # 1) Ubuntu repository
-  # ---------------------------------------------------------------------------
   if [[ $REPLY == 1 ]]; then
     banner "Installing Go from your distro repositories"
     sudo apt-get install -y golang-go
@@ -121,14 +111,12 @@ install_go() {
     return 0
   fi
 
-  # ---------------------------------------------------------------------------
   # 2) Official tarball (download & verify)
-  # ---------------------------------------------------------------------------
   banner "Installing Go ${wanted_ver} from official tarball"
 
   cd "$HOME" || { failure "cannot cd \$HOME"; return 1; }
 
-  local base="https://dl.google.com/go"   # ← raw files (no HTML wrapper)
+  local base="https://dl.google.com/go"
   local tar="go${wanted_ver}.linux-amd64.tar.gz"
   local url="${base}/${tar}"
   local sum_url="${url}.sha256"
@@ -153,6 +141,13 @@ install_go() {
   success "Go ${wanted_ver} installed to /usr/local/go"
 }
 
+# --------------------------------------------------------------------------
+# add_go_env
+# • Persists GOROOT / GOPATH and patches PATH in ~/.bash_profile + ~/.bashrc
+# • Replaces any previous block between markers, keeping the files tidy
+# • Evaluates the new exports immediately so the current shell picks them up
+# • Idempotent: rerunning replaces the existing block instead of duplicating it
+# --------------------------------------------------------------------------
 add_go_env() {
   local profile="$HOME/.bash_profile"
   local bashrc="$HOME/.bashrc"
@@ -163,7 +158,7 @@ add_go_env() {
 
   # Fresh content we want in both files
   read -r -d '' new_block <<'EOF'
-# ----- Go tool‑chain ----------------------------------------------------
+# Go Tool-Chain
 if [ -d /usr/local/go ]; then
   export GOROOT=/usr/local/go         # tarball install
 elif [ -d /usr/lib/go ]; then
@@ -197,6 +192,13 @@ EOF
   eval "$new_block"
 }
 
+# --------------------------------------------------------------------------
+# add_mayanode_env
+# • Writes MAYANODE-specific environment variables (e.g. MAYANODE_NODE) to
+#     ~/.bash_profile and ~/.bashrc between unique markers
+# • Idempotent: rerunning replaces the existing block rather than duplicating it
+# • Immediately evals the block so the current shell inherits the variables
+# --------------------------------------------------------------------------
 add_mayanode_env() {
   local profile="$HOME/.bash_profile"
   local bashrc="$HOME/.bashrc"
@@ -204,7 +206,7 @@ add_mayanode_env() {
 
   local marker="# >>> MAYANODE-ENV >>>"
   read -r -d '' env_block <<'EOF'
-# ── Mayanode environment variables ───────────────────────────────────────
+# ── Mayanode environment variables ─────────────────────────────────────────
 # MAYANODE_NODE for the Tendermint RPC endpoint
 export MAYANODE_NODE="tcp://localhost:27147"
 EOF
@@ -220,6 +222,13 @@ EOF
   eval "$env_block"
 }
 
+# --------------------------------------------------------------------------
+# install_docker
+# • Adds Docker’s official APT repository and GPG key, then installs
+#     docker-ce, CLI, containerd, Buildx, and Compose
+# • Idempotent: re-running simply confirms the packages are present/up-to-date
+# • Returns non-zero on any network, key-import, or apt failure
+# --------------------------------------------------------------------------
 install_docker() {
   sudo mkdir -p /etc/apt/keyrings
   curl -fsSL https://download.docker.com/linux/ubuntu/gpg |
@@ -233,6 +242,12 @@ install_docker() {
        docker-buildx-plugin docker-compose-plugin
 }
 
+# --------------------------------------------------------------------------
+# install_aws_cli
+# • Installs AWS CLI v2 from the official ZIP when the `aws` binary is absent
+# • Idempotent: skips download and install when AWS CLI is already in PATH
+# • Returns non-zero on any network, unzip, or installer failure
+# --------------------------------------------------------------------------
 install_aws_cli() {
   if ! command -v aws >/dev/null; then
     curl -s "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
@@ -242,6 +257,13 @@ install_aws_cli() {
   fi
 }
 
+# --------------------------------------------------------------------------
+# install_mayanode
+# • Clones the mayanode Git repository (skips if already present)
+# • Prompts the user to pick a tag/branch, checks it out, and optionally runs
+#     `make protob` to generate protobuf files
+# • Idempotent: if $HOME/mayanode/.git exists it simply returns success
+# --------------------------------------------------------------------------
 install_mayanode() {
   # Skip clone & checkout when the repository already exists
   if [ -d "$HOME/mayanode/.git" ]; then
@@ -255,12 +277,17 @@ install_mayanode() {
   cd mayanode
   git fetch --tags --quiet
   git fetch origin develop --quiet
-  local options=(develop $(git tag))
+  # Read tags into an array without word-splitting
+  mapfile -t _tags < <(git tag)
+  local options=(develop "${_tags[@]}")
   echo "Available branches/tags:"
   for i in "${!options[@]}"; do printf "%2s) %s\n" "$i" "${options[$i]}"; done
   read -rp "Enter number to check out: " sel
-  [[ "$sel" =~ ^[0-9]+$ ]] && (( sel < ${#options[@]} )) || {
-        failure "Invalid selection"; return 1; }
+  if ! [[ "$sel" =~ ^[0-9]+$ ]] || (( sel >= ${#options[@]} )); then
+    failure "Invalid selection"
+    return 1
+  fi
+
   git checkout -q "${options[$sel]}"
 
   if prompt "Build mayanode with 'make protob'?"; then
@@ -268,11 +295,16 @@ install_mayanode() {
   fi
 }
 
+# --------------------------------------------------------------------------
+# create_service
+# • Generates /etc/systemd/system/mayanode.service if it does not already exist
+# • Sets up ExecStart/Pre, environment variables, and enables automatic restarts
+# • Idempotent: skips creation when the unit file is present; returns success
+# --------------------------------------------------------------------------
 create_service() {
   local svc_path="/etc/systemd/system/mayanode.service"
-  # -----------------------------------------------------------------------
+
   # Skip creation when the unit file is already present
-  # -----------------------------------------------------------------------
   if [ -f "$svc_path" ]; then
     echo "[i] $svc_path already exists – skipping service creation."
     return 0           # success → run_step proceeds to the next step
@@ -304,6 +336,15 @@ WantedBy=multi-user.target
 EOF
 }
 
+# --------------------------------------------------------------------------
+# install_binary
+# • Runs `make install` (TAG=mainnet NET=mainnet) to build & install mayanode
+#     into $HOME/go/bin
+# • Copies the binary to /usr/local/bin (sudo) so every user and future shell
+#     can invoke `mayanode`; refreshes the shell’s hash table (hash -r)
+# • Idempotent: re-running overwrites the same /usr/local/bin/mayanode
+#     with the identical binary, causing no side-effects
+# --------------------------------------------------------------------------
 install_binary() {
   cd "$HOME/mayanode"
   TAG=mainnet NET=mainnet make install
@@ -317,6 +358,13 @@ install_binary() {
   echo "[i] Installed mayanode → /usr/local/bin/mayanode"
 }
 
+# --------------------------------------------------------------------------
+# configure_shared_libs
+# • Registers $HOME/mayanode/lib in /etc/ld.so.conf.d and runs ldconfig so the
+#     dynamic linker can find mayanode’s shared libraries system-wide
+# • Idempotent: overwrites the same /etc/ld.so.conf.d/mayanode.conf on each run
+# • Returns non-zero if it cannot write the conf file or ldconfig fails
+# --------------------------------------------------------------------------
 configure_shared_libs() {
   local libdir="$HOME/mayanode/lib"
 
@@ -325,6 +373,13 @@ configure_shared_libs() {
   sudo ldconfig
 }
 
+# --------------------------------------------------------------------------
+# fetch_snapshot
+# • Downloads the latest pruned or full blockchain snapshot from S3, verifies
+#     free disk space, and (optionally) extracts it, swapping the node database
+# • Stops mayanode before extraction and restarts it afterward if it was
+#     previously running; makes a timestamped backup of any existing DB
+# --------------------------------------------------------------------------
 fetch_snapshot() {
   set -e
   local SNAP_BUCKET="public-snapshots-mayanode"
@@ -333,7 +388,7 @@ fetch_snapshot() {
   local dbdir="$workdir/data"            # current database
   mkdir -p "$dbdir"
 
-  # ── 1. Snapshot flavour ────────────────────────────────────────────────
+  # 1) Snapshot flavour
   echo -e "\nChoose snapshot type:"
   PS3=$'[?] Snapshot type → '
   select SNAP_CLASS in pruned full; do [[ -n $SNAP_CLASS ]] && break; done
@@ -341,7 +396,7 @@ fetch_snapshot() {
         && echo -e "\n[i] Full snapshots ≈ 750 GB." \
         || echo -e "\n[i] Pruned snapshots ≈ 200 GB."
 
-  # ── 2. Latest height ───────────────────────────────────────────────────
+  # 2) Latest height
   prompt "Look up the latest snapshot height now?" || { echo "Skipped."; return 0; }
   echo "[+] Querying bucket …"
   height=$(aws s3 ls "s3://${SNAP_BUCKET}/${SNAP_CLASS}/" --no-sign-request |
@@ -349,14 +404,14 @@ fetch_snapshot() {
   [[ -n $height ]] || { failure "Could not determine snapshot height"; return 1; }
   prompt "Latest snapshot is ${height}. Continue?" || { echo "Aborted."; return 1; }
 
-  # ── 2b. Free‑space guard ───────────────────────────────────────────────
+  # 3) Free‑space guard
   local required_gb free_gb
   if [[ $SNAP_CLASS == full ]]; then required_gb=800; else required_gb=250; fi
   free_gb=$(df -BG "$workdir" | awk 'NR==2 {print int($4)}')
   (( free_gb >= required_gb )) || {
        failure "Only ${free_gb} GB free; need ${required_gb} GB."; return 1; }
 
-  # ── 3. Download tarball ────────────────────────────────────────────────
+  # 4) Download tarball
   snap_url="s3://${SNAP_BUCKET}/${SNAP_CLASS}/${height}/${height}.tar.gz"
   local tmp_tar="$workdir/${height}.tar.gz.partial"
   local final_tar="$workdir/${height}.tar.gz"
@@ -365,13 +420,13 @@ fetch_snapshot() {
   mv "$tmp_tar" "$final_tar"
   echo "[✓] Download complete → ${final_tar}"
 
-  # ── 3b. Ask whether to proceed with extraction NOW ─────────────────────
+  # 5) Ask whether to proceed with extraction NOW or postpone
   if ! prompt "Extract & apply the snapshot now? (node will be stopped)"; then
       echo "[i] Extraction postponed.  Keep ${final_tar} and run this function later."
       return 0
   fi
 
-  # ── 4. Stop running service ────────────────────────────────────────────
+  # 6) Stop running service
   local running=false
   if systemctl is-active --quiet mayanode; then
     running=true
@@ -379,7 +434,7 @@ fetch_snapshot() {
     sudo systemctl stop mayanode
   fi
 
-  # ── 5. Decide strip depth (1 or 2) by peeking into the tarball ─────────
+  # 7) Decide strip depth (1 or 2) by peeking into the tarball
   local strip_depth
   if tar tzf "$final_tar" | head -1 | grep -qE '^[0-9]+/data/'; then
       strip_depth=2          # <height>/data/…
@@ -387,7 +442,7 @@ fetch_snapshot() {
       strip_depth=1          # data/…
   fi
 
-  # ── 6. Extract into fresh dir ──────────────────────────────────────────
+  # 8) Extract into fresh dir
   local newdir="$workdir/data.new"
   rm -rf "$newdir" && mkdir -p "$newdir"
   echo "[→] Extracting with --strip-components=${strip_depth} …"
@@ -400,7 +455,7 @@ fetch_snapshot() {
         failure "Extraction incomplete"; rm -rf "$newdir";
         $running && sudo systemctl start mayanode; return 1; }
 
-  # ── 7. Swap database; backup only if an old DB exists ──────────────────
+  # 9) Swap database; backup only if an old DB exists
   local timestamp; timestamp=$(date +%Y%m%d-%H%M%S)
   if [[ -d "$dbdir/application.db" ]]; then
       mv "$dbdir" "${dbdir}.backup-${timestamp}"
@@ -413,14 +468,19 @@ fetch_snapshot() {
 
   $running && { echo "[i] Restarting mayanode"; sudo systemctl start mayanode; }
 
-  # ── 8. Optional cleanup ────────────────────────────────────────────────
+  # 10) Optional cleanup
   prompt "Delete downloaded tarball to save space?" && rm -f "$final_tar"
 
   success "Snapshot restore finished"
 }
 
-
-
+# --------------------------------------------------------------------------
+# setup_ufw
+# • Installs and configures UFW: default deny-in / allow-out, plus rules for
+#     SSH, MAYAChain P2P (27146), Tendermint RPC (27147), and optional REST 1317
+# • Idempotent: re-runs `ufw reset`, then re-applies rules based on prompts
+# • Returns non-zero only if UFW or apt operations fail
+# --------------------------------------------------------------------------
 setup_ufw() {
   if ! dpkg -s ufw >/dev/null 2>&1; then
     sudo apt-get update -y && sudo apt-get install -y ufw
@@ -475,15 +535,20 @@ setup_ufw() {
   sudo ufw status verbose
 }
 
+# --------------------------------------------------------------------------
+# enable_service
+# • Reloads systemd daemon, enables the mayanode service, and starts it
+#     immediately (`systemctl enable --now`)
+# • Prints concise status output; returns non-zero if systemctl commands fail
+# • Idempotent: subsequent runs leave the service enabled and simply restart it
+# --------------------------------------------------------------------------
 enable_service() {
   sudo systemctl daemon-reload
   sudo systemctl enable --now mayanode.service
   sudo systemctl status --no-pager mayanode
 }
 
-###############################################################################
-# Main execution flow
-###############################################################################
+# ───────────────────────── Main Execution Flow ────────────────────────────
 main() {
   banner "Interactive Mayanode setup script"
   run_step "Install required apt packages"      install_packages
@@ -506,7 +571,7 @@ main() {
 
 }
 
-if [[ $BASH_SOURCE == "$0" ]]; then
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
   # Ensure environment is set without sourcing potentially problematic files
   export PATH="$PATH:$HOME/go/bin:/usr/local/bin"
   export MAYANODE_NODE="tcp://localhost:27147"
