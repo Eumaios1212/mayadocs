@@ -10,6 +10,11 @@ if [[ $EUID -eq 0 ]]; then
   exit 1
 fi
 
+if ! sudo -n true 2>/dev/null; then
+  echo "✗ This installer requires passwordless sudo access."
+  exit 1
+fi
+
 set -Eeuo pipefail  # Fail fast on errors, undefined vars, or pipeline errors.
 
 # ─────────────────────── Pretty-Printing Helpers ──────────────────────────
