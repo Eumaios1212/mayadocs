@@ -2,59 +2,42 @@
 # setup-mayanode.sh
 # Interactive, Step-by-Step Mayanode Installation
 
-# ───────────────────────── Abort If Run As Root ────────────────────────────
-# Always invoke as an unprivileged user who can sudo when prompted.
+
+###############################################################################
+# 0. Early safety‑nets
+###############################################################################
 if [[ $EUID -eq 0 ]]; then
-  echo "✗  Please run this script as a regular user who can sudo, not as root."
-  echo "   e.g.  chmod +x setup-mayanode.sh && ./setup-mayanode.sh"
+  echo "✗  Run this script as a regular user (with sudo), not as root."
   exit 1
 fi
-
-set -Eeuo pipefail  # Fail fast on errors, undefined vars, or pipeline errors.
-
-# ─────────────────────── Pretty-Printing Helpers ──────────────────────────
-GREEN=$(tput setaf 2)
-RED=$(tput setaf 9)
-YELLOW=$(tput setaf 11)
-RESET=$(tput sgr0)
-
-# ─────────────────────────── Logging Setup ────────────────────────────────
-LOG_DIR="$HOME/mayanode-setup-logs"
-mkdir -p "$LOG_DIR"
-LOG_FILE="$LOG_DIR/$(date +%Y%m%d-%H%M%S).log"
-
-exec 9>>"$LOG_FILE"
-export BASH_XTRACEFD=9
-set -x  # Tracing is active (file only)
-exec > >(tee -a "$LOG_FILE") 2>&1
-
-# ────────────────────────── Shell Safety-Nets ─────────────────────────────
+set -Eeuo pipefail
 IFS=$'\n\t'
 
-# ──────────────── Pretty-Printing Convenience Functions ───────────────────
-banner()        { printf "\n${YELLOW}==> %s${RESET}\n" "$*"; }
-success()       { printf "${GREEN}✓ %s${RESET}\n" "$*"; }
-failure()       { printf "${RED}✗ %s${RESET}\n" "$*"; }
-prompt() {
-  local reply
-  printf "${YELLOW}?${RESET} %s [y/N]: " "$*"
-  read -r reply
-  [[ "$reply" =~ ^[Yy]$ ]]
-}
+###############################################################################
+# 1. Pretty printing & logging
+###############################################################################
+GREEN=$(tput setaf 2) ; RED=$(tput setaf 9) ; YELLOW=$(tput setaf 11) ; RESET=$(tput sgr0)
+banner()  { printf "\n${YELLOW}==> %s${RESET}\n" "$*"; }
+success() { printf   "${GREEN}✓ %s${RESET}\n"  "$*"; }
+failure() { printf   "${RED}✗ %s${RESET}\n"  "$*"; }
+prompt()  { local r; printf "${YELLOW}?${RESET} %s [y/N]: " "$*"; read -r r; [[ $r =~ ^[Yy]$ ]]; }
 
-# ─────────── Utility for Guarded Execution of a Named Function ────────────
+LOG_DIR="$HOME/mayanode-setup-logs"; mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/$(date +%Y%m%d-%H%M%S).log"
+exec 9>>"$LOG_FILE"; export BASH_XTRACEFD=9; set -x
+exec > >(tee -a "$LOG_FILE") 2>&1
+trap 'set +x; exec 9>&-; exit' EXIT   # close FD 9 on exit
+
+###############################################################################
+# 2. Generic step runner
+###############################################################################
 run_step() {
-  local step_name=$1; shift
-  banner "$step_name"
-  if prompt "Proceed with \"$step_name\"?"; then
-    if "$@"; then
-      success "$step_name completed"
-    else
-      failure "$step_name failed – exiting."
-      exit 1
-    fi
+  local name=$1; shift
+  banner "$name"
+  if prompt "Proceed with \"$name\"?"; then
+    "$@" && success "$name completed" || { failure "$name failed – exiting."; exit 1; }
   else
-    printf "Skipping \"%s\"\n" "$step_name"
+    echo "Skipping \"$name\""
   fi
 }
 
@@ -295,45 +278,107 @@ install_mayanode() {
   fi
 }
 
+
+###############################################################################
+# Helpers for the external P2P address
+###############################################################################
+get_external_addr() {
+  local a
+  while true; do
+    read -rp "Public P2P address to advertise (host:port) [blank = none]: " a
+    [[ -z $a ]] && { echo ""; return; }
+    # host / IPv4 / [IPv6]  plus colon & port 1‑65535
+    if [[ $a =~ ^([a-zA-Z0-9.-]+|\[[0-9a-fA-F:]+\]):([1-9][0-9]{0,4})$ \
+          && ${BASH_REMATCH[2]} -le 65535 ]]; then
+      echo "$a"; return
+    fi
+    echo "✗  Invalid. Examples:  node.example.com:27146   or   203.0.113.7:27146"
+  done
+}
+
+
+set_external_addr() {                 # ← **ONLY CHANGED FUNCTION**
+  local addr=$1 cfg="$HOME/.mayanode/config/config.toml"
+  [[ -z $addr ]] && return 0          # nothing to do
+
+  mkdir -p "$(dirname "$cfg")"
+  if grep -Eq '^[[:space:]]*#?[[:space:]]*external_address[[:space:]]*=' "$cfg" 2>/dev/null; then
+    # replace (also works if the line is commented out or indented)
+    sed -Ei 's|^[[:space:]]*#?[[:space:]]*external_address[[:space:]]*=.*|external_address = "'"$addr"'"|' "$cfg"
+  else
+    # append cleanly at EOF
+    printf '\nexternal_address = "%s"\n' "$addr" >>"$cfg"
+  fi
+}
+
+ensure_configs() {               # $1 = addr
+  local cfg="$HOME/.mayanode/config/config.toml"
+  [[ -f $cfg ]] || /usr/local/bin/mayanode render-config
+  set_external_addr "$1"
+}
+
 # --------------------------------------------------------------------------
 # create_service
-# • Generates /etc/systemd/system/mayanode.service if it does not already exist
-# • Sets up ExecStart/Pre, environment variables, and enables automatic restarts
-# • Idempotent: skips creation when the unit file is present; returns success
+# • (Re)writes /etc/systemd/system/mayanode.service so that, on every start,
+#   it patches ~/.mayanode/config/config.toml to contain the user‑supplied
+#   external_address.  The heavy‑weight `render-config` is still executed
+#   only on the first boot when no config exists.
 # --------------------------------------------------------------------------
-create_service() {
-  local svc_path="/etc/systemd/system/mayanode.service"
 
-  # Skip creation when the unit file is already present
-  if [ -f "$svc_path" ]; then
-    echo "[i] $svc_path already exists – skipping service creation."
-    return 0           # success → run_step proceeds to the next step
-  fi
-
+create_service() {                          # $1 = addr (may be blank)
+  local addr="$1"
+  local svc="/etc/systemd/system/mayanode.service"
   local user="${SUDO_USER:-$(whoami)}"
+  local home="/home/${user}"
+  local flag=""; [[ -n $addr ]] && flag=" --external_address=${addr}"
 
-  cat <<EOF | sudo tee "$svc_path" > /dev/null
+  # ── ExecStartPre #1 ──────────────────────────────────────────────────────
+  # Generate default config *only once*, in the right place.
+  local exec_pre1="/usr/bin/bash -c '[ -f \"${home}/.mayanode/config/config.toml\" ] || \
+/usr/local/bin/mayanode render-config --home \"${home}/.mayanode\"${flag}'"
+
+  # ── ExecStartPre #2 ──────────────────────────────────────────────────────
+  # Ensure/refresh the external_address inside config.toml every restart.
+  local exec_pre2="/usr/bin/bash -c 'cfg=\"${home}/.mayanode/config/config.toml\"; \
+grep -q \"^[[:space:]]*external_address[[:space:]]*=.*${addr}\" \"\$cfg\" && exit 0; \
+if grep -q \"^[[:space:]]*external_address[[:space:]]*=\" \"\$cfg\"; then \
+  sed -Ei \"s|^[[:space:]]*external_address[[:space:]]*=.*|external_address = \\\"${addr}\\\"|\" \"\$cfg\"; \
+else \
+  echo \"external_address = \\\"${addr}\\\"\" >> \"\$cfg\"; \
+fi'"
+
+  # ── Rewrite the unit only if necessary ──────────────────────────────────
+  if [[ -f $svc ]] && grep -qF "ExecStartPre=${exec_pre1}" "$svc" \
+                   && grep -qF "ExecStartPre=${exec_pre2}" "$svc"; then
+    echo "[i] systemd unit already up‑to‑date – skipping."
+    return 0
+  fi
+  echo "[i] (Re)writing systemd unit with correct ExecStartPre commands."
+
+  cat <<EOF | sudo tee "$svc" >/dev/null
 [Unit]
 Description=Mayanode
 After=network-online.target
+Wants=network-online.target
 
 [Service]
 User=${user}
-WorkingDirectory=/home/${user}/mayanode
-ExecStartPre=/usr/local/bin/mayanode render-config
-ExecStart=/usr/local/bin/mayanode start
+WorkingDirectory=${home}/mayanode
+ExecStartPre=${exec_pre1}
+ExecStartPre=${exec_pre2}
+ExecStart=/usr/local/bin/mayanode start --home ${home}/.mayanode
 Restart=always
 RestartSec=3
 LimitNOFILE=4096
 Environment="MAYA_COSMOS_TELEMETRY_ENABLED=true"
 Environment="CHAIN_ID=mayachain-mainnet-v1"
 Environment="NET=mainnet"
-#Environment="SIGNER_NAME=mayachain"    # Only needed for validator nodes
-#Environment="SIGNER_PASSWD=password"   # Only needed for validator nodes
 
 [Install]
 WantedBy=multi-user.target
 EOF
+
+  success "systemd unit written/updated"
 }
 
 # --------------------------------------------------------------------------
@@ -551,6 +596,7 @@ enable_service() {
 # ───────────────────────── Main Execution Flow ────────────────────────────
 main() {
   banner "Interactive Mayanode setup script"
+
   run_step "Install required apt packages"      install_packages
   run_step "Install Go"                         install_go
   run_step "Add Go env vars"                    add_go_env
@@ -558,8 +604,12 @@ main() {
   run_step "Install Docker & Compose"           install_docker
   run_step "Install AWS CLI"                    install_aws_cli
   run_step "Clone / build Mayanode"             install_mayanode
-  run_step "Create systemd service"             create_service
   run_step "Install Mayanode binary"            install_binary
+
+  EXT_ADDR=$(get_external_addr)
+  run_step "Ensure configs"              	ensure_configs "$EXT_ADDR"
+  run_step "Create systemd service"      	create_service "$EXT_ADDR"
+
   run_step "Configure shared libraries"         configure_shared_libs
   run_step "Fetch & extract latest snapshot"    fetch_snapshot
   run_step "Configure UFW firewall"             setup_ufw
